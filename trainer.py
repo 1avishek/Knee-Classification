@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.cuda import amp
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score, average_precision_score
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,15 +9,20 @@ import os
 
 
 def train_and_validate(model, train_loader, val_loader, args, fold):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+
     model = model.to(device)
 
     # --- Define loss and optimizer ---
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    scaler = amp.GradScaler(enabled=args.use_amp and device.type == "cuda")
 
     # --- Tracking ---
-    num_epochs = 10  # you can adjust this or add as argument
+    num_epochs = args.epochs
     train_loss_list, val_loss_list = [], []
     train_bal_acc_list, val_bal_acc_list = [], []
     train_roc_auc_list, val_roc_auc_list = [], []
@@ -38,18 +44,15 @@ def train_and_validate(model, train_loader, val_loader, args, fold):
             imgs = batch["img"]
             labels = batch["label"].to(device)
 
-            # convert grayscale (H, W) to (B, C, H, W)
-            if len(imgs.shape) == 3:
-                imgs = imgs.unsqueeze(1)  # Add channel dim
-
             imgs = imgs.float().to(device)
 
             optimizer.zero_grad()
-            outputs = model(imgs)
-
-            loss = criterion(outputs, labels.long())
-            loss.backward()
-            optimizer.step()
+            with amp.autocast(enabled=scaler.is_enabled()):
+                outputs = model(imgs)
+                loss = criterion(outputs, labels.long())
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item() * imgs.size(0)
             probs = torch.softmax(outputs, dim=1)
@@ -105,9 +108,6 @@ def validate(model, loader, criterion, device):
         for batch in loader:
             imgs = batch["img"]
             labels = batch["label"].to(device)
-
-            if len(imgs.shape) == 3:
-                imgs = imgs.unsqueeze(1)
 
             imgs = imgs.float().to(device)
             outputs = model(imgs)
